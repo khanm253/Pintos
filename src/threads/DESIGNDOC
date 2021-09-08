@@ -1,0 +1,973 @@
+            +--------------------+
+            | CSCC69             |
+            | PROJECT 1: THREADS |
+            | DESIGN DOCUMENT    |
+            +--------------------+
+                   
+---- GROUP ----
+
+
+>> Fill in the names and email addresses of your group members.
+
+ 
+Mohammed Abdullah Ibne Khan mohammedibne.khan@mail.utoronto.ca
+Junaid Syed junaid.syed@mail.utoronto.ca
+Chi Jian, Hsu, chijian.hsu@mail.utoronto.ca
+
+
+---- PRELIMINARIES ----
+
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+
+                 ALARM CLOCK
+                 ===========
+
+
+---- DATA STRUCTURES ----
+
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+
+Added new struct in timer.c:
+    //This list holds the sleeping threads, used in timer_sleep()
+    struct list list_sleeping_threads;
+    
+Modified the function timer_sleep to suspend the activity of a thread temporarily for the
+given number of ticks, thread will be ready again after the ticks have passed
+
+
+    /* Sleeps for approximately TICKS timer ticks and eliminated busy wait.  Interrupts must
+       be turned on. */
+    void
+   timer_sleep (int64_t ticks)
+{
+  //int64_t start = timer_ticks ();
+  if(ticks>0){ //if given tick is valid
+    ASSERT (intr_get_level () == INTR_ON);
+
+
+    //Setting the break_sleep time for current thread
+    thread_current()->break_sleep_tick = timer_ticks() + ticks;
+
+
+    intr_disable();
+
+
+    //insert all sleeping threads to list_sleeping_threads in order of
+    //ascending break_sleeping time
+    list_insert_ordered(&list_sleeping_threads,&thread_current()->elem,(list_less_func *)&ascending_listsort_time,NULL);
+
+
+    //block the current thread or put to sleep
+    thread_block();
+
+
+    intr_enable();
+  }
+}
+
+timer_interrupt suspends is used to handle the interrupts for the timer
+
+   /* Timer interrupt handler. */
+static void
+timer_interrupt (struct intr_frame *args UNUSED)
+{
+  ticks++;
+  thread_tick ();
+
+
+  //Goes through list of sleeping threads and wakes up eligible threads
+  while(list_begin(&list_sleeping_threads)!=list_end(&list_sleeping_threads)){
+
+
+    //shortest time for below thread before waking up
+    struct thread *shortest_sleeping = list_entry(list_front(&list_sleeping_threads),struct thread,elem);
+
+
+    if((shortest_sleeping->break_sleep_tick-ticks)<=0){ //still time left for sleep
+       //remove just awakened thread from sleeping list
+       list_pop_front(&list_sleeping_threads);
+
+
+       //thread was previously blocked so unblock now for use
+       thread_unblock(shortest_sleeping);
+
+
+    }else{
+        break;
+    }
+  }
+}
+
+Helper function ascending_listsort_time compares sleep times of two struct list_elem
+
+bool ascending_listsort_time(struct list_elem *one,struct list_elem *two){
+
+   if((list_entry(one,struct thread,elem)->break_sleep_tick - list_entry(two,struct thread,elem)->break_sleep_tick)<0){
+    return 1;
+   }
+
+   return 0;
+}
+
+Added to struct thread:
+
+
+    int64_t break_sleep_tick;          /* Saved stack pointer. */
+    
+
+
+---- ALGORITHMS ----
+
+
+>> A2: Briefly describe what happens in a call to timer_sleep(),
+>> including the effects of the timer interrupt handler.
+
+
+ANSWER: When timer_sleep is called, it assigns a value to the thread's
+        break_sleep_tick for when the thread should wake up again. After being
+        assigned this value, the thread is added to a list of all sleeping threads
+        which is sorted in ascending order. Then current thread is put to sleep.
+
+
+        The timer interrupt handler goes through the sleeping list, checking if it
+        time for a thread to be waken up. If it is time to be waken up then the thread
+        is popped from the list and is unblocked.
+
+
+>> A3: What steps are taken to minimize the amount of time spent in
+>> the timer interrupt handler?
+
+
+ANSWER: We have the sleeping list already sorted in ascending order of
+        the time, so when we traverse the list, once we find the first thread
+        that cant be woken up, we immediately break and dont need to look at
+        everything else afterwards because those threads will also not be waken up
+        since they have a higher or equal time to be waken up.
+
+
+---- SYNCHRONIZATION ----
+
+
+>> A4: How are race conditions avoided when multiple threads call
+>> timer_sleep() simultaneously?
+>> ANSWER: To avoid race conditions, intr_disable() and intr_enable() are used together . Interrupts are disable when performing list insertion to ensure that it is recorded in an ascending wake time format as our design wants. After that, the interrupts are enabled again and other threads can call and use it as wanted.
+
+
+>> A5: How are race conditions avoided when a timer interrupt occurs
+>> during a call to timer_sleep()?
+>> ANSWER: As mentioned in Q:A4, interrupts are disabled, thus a timer interrupt would not affect the operations inside timer_sleep()
+
+---- RATIONALE ----
+
+
+>> A6: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+>>ANSWER: We tried implementation of this part of the assignment using semaphores, however if kept crashing, and we decided to stick to this implementation using a sorted list of sleeping threads what are blocked after insertion inside timer_sleep(). This list is also time efficient/easy to unterstand, when it comes to handling timer_interrupts, as sorting them in ascending order means that as soon as we find the first thread that is still eligible to be sleeping, we can stop traversal, thus not having to go through each and every element. A possible drawback included, having to handle the case of sleeping threads during priority donation, later in the project.
+
+
+             PRIORITY SCHEDULING
+             ===================
+
+
+---- DATA STRUCTURES ----
+
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+Changes in struct thread in Thread.h:
+struct thread
+  {
+    //***start adding extra elements for priority donation
+
+    int basepriority;  //Holds the original priority set during creation of thread
+    struct list list_pri_donors; //All threads donating priorities of the lock that this thread             holds
+    struct list_elem each_donor; //Individual donors in inside the list of priority donors
+    struct thread *lock_holder; // Thread holding the lock that’s wanted by the current thread
+    struct lock *wanted_lock; // The lock that the current_thread wants to attain 
+  }; 
+
+Changes in synch.c:
+
+Updated so priority donation is functional. It will traverse up to 9 times if possible. After, it sorts the threads by priority.
+
+void
+sema_down (struct semaphore *sema)
+{
+
+  enum intr_level old_level;
+
+  ASSERT (sema != NULL);
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+  while (sema->value == 0){
+
+    struct thread *current = thread_current();
+    struct lock *wanted_lock = current->wanted_lock;
+    int depth = 9;
+
+    while(wanted_lock!=NULL){
+        if(depth<=0){
+            break;
+        }
+        if(wanted_lock->holder==NULL ||(wanted_lock->holder->priority - current->priority)>=0){
+            break;
+        }
+        wanted_lock->holder->priority = current->priority;
+        current = wanted_lock->holder;
+        wanted_lock = current->wanted_lock;
+        depth--;
+    }
+
+      list_push_back (&sema->waiters, &thread_current ()->elem);
+      list_sort(&sema->waiters,(list_less_func *) &descend_sort_by_pri,NULL);
+      thread_block ();
+  }
+  sema->value--;
+  intr_set_level (old_level);
+}
+
+
+Updated to sort the threads by priority if list is not empty.
+
+void
+sema_up (struct semaphore *sema)
+{
+ enum intr_level old_level;
+
+  ASSERT (sema != NULL);
+
+  old_level = intr_disable ();
+  if (!list_empty (&sema->waiters))
+  {
+    list_sort (&sema->waiters, (list_less_func *)&descend_sort_by_pri, NULL);
+    thread_unblock (list_entry (list_pop_front (&sema->waiters),
+                                struct thread, elem));
+  }
+  sema->value++;
+  thread_yield();
+  intr_set_level (old_level);
+}
+
+Updated to have the list in sorted order of decreasing priority.
+
+void
+lock_acquire (struct lock *lock)
+{
+
+  ASSERT (lock != NULL);
+  ASSERT (!intr_context ());
+  ASSERT (!lock_held_by_current_thread (lock));
+
+  enum intr_level old_level = intr_disable ();
+
+   if (lock->holder!=NULL)
+    {
+
+      list_insert_ordered(&lock->holder->list_pri_donors,
+              &thread_current()->each_donor,
+              (list_less_func *) &descend_sort_by_pri, NULL);
+      thread_current()->wanted_lock = lock;
+    }
+  sema_down (&lock->semaphore);
+  lock->holder = thread_current ();
+
+  intr_set_level (old_level);
+}
+
+Updated to remove lock from the list of donors. If thread no longer has a list of donors, return its priority to its base.
+
+void
+lock_release (struct lock *lock)
+{
+  ASSERT (lock != NULL);
+  ASSERT (lock_held_by_current_thread (lock));
+
+  enum intr_level old_level = intr_disable();
+  lock->holder = NULL;
+
+  struct list_elem *i = list_begin(&thread_current()->list_pri_donors);
+  while (i != list_end(&thread_current()->list_pri_donors))
+    {
+      struct thread *donor = list_entry(i, struct thread, each_donor);
+      if (donor->wanted_lock != lock)
+      {
+         list_sort(&thread_current()->list_pri_donors,(list_less_func *)&descend_sort_by_pri,NULL);
+       }else{
+        list_remove(i);
+       }
+      i = list_next(i);
+    }
+
+    if(list_empty(&thread_current()->list_pri_donors)){
+        thread_current()->priority = thread_current()->basepriority;
+    }else{
+        struct list_elem *donor_elem = list_front(&thread_current()->list_pri_donors);
+        struct thread *pri_donor = list_entry(donor_elem,struct thread, each_donor);
+        thread_current()->priority = thread_current()->basepriority;
+       if((pri_donor->priority-thread_current()->priority)>0){
+            thread_current()->priority= pri_donor->priority;
+        }else{
+            thread_current()->priority = thread_current()->basepriority;
+        }
+    }
+
+  sema_up (&lock->semaphore);
+  intr_set_level (old_level);
+}
+
+Updated to sort list of waiters if list is not empty
+
+void
+cond_signal (struct condition *cond, struct lock *lock UNUSED)
+{
+  ASSERT (cond != NULL);
+  ASSERT (lock != NULL);
+  ASSERT (!intr_context ());
+  ASSERT (lock_held_by_current_thread (lock));
+
+  if (!list_empty (&cond->waiters)){
+    list_sort(&cond->waiters,(list_less_func*)&descend_sort_by_conpri,NULL);
+    sema_up (&list_entry (list_pop_front (&cond->waiters),
+                          struct semaphore_elem, elem)->semaphore);
+  }
+
+}
+
+Function iterates through locks chain starting from the current thread till no more wanted locks available
+
+void iterate_and_update_pri(struct lock *lock,struct thread *current_thread){
+        lock->holder->priority = current_thread->priority;
+        current_thread = lock->holder;
+        lock = current_thread->wanted_lock;
+}
+
+Function sort the threads waiting in the sema waiters list according to priority
+
+int descend_sort_by_conpri(struct list_elem *one, struct list_elem *two)
+{
+  struct semaphore_elem *one_elem = list_entry (one, struct semaphore_elem, elem);
+  struct semaphore_elem *two_elem = list_entry (two, struct semaphore_elem, elem);
+  struct thread *thread1 = list_entry(list_front(&one_elem->semaphore.waiters), struct thread, elem);
+  struct thread *thread2 = list_entry(list_front(&two_elem->semaphore.waiters), struct thread, elem);
+  if((thread1->priority - thread2->priority)>0){
+    return 1;
+  }
+  return 0;
+
+}
+
+
+Changes in Threads.c:
+
+Updated to yield the CPU
+
+tid_t
+thread_create (const char *name, int priority,
+               thread_func *function, void *aux)
+{
+  struct thread *t;
+  struct kernel_thread_frame *kf;
+  struct switch_entry_frame *ef;
+  struct switch_threads_frame *sf;
+  tid_t tid;
+
+  ASSERT (function != NULL);
+
+  /* Allocate thread. */
+  t = palloc_get_page (PAL_ZERO);
+  if (t == NULL)
+    return TID_ERROR;
+
+  /* Initialize thread. */
+  init_thread (t, name, priority);
+  tid = t->tid = allocate_tid ();
+
+  /* Stack frame for kernel_thread(). */
+  kf = alloc_frame (t, sizeof *kf);
+  kf->eip = NULL;
+  kf->function = function;
+  kf->aux = aux;
+
+  /* Stack frame for switch_entry(). */
+  ef = alloc_frame (t, sizeof *ef);
+  ef->eip = (void (*) (void)) kernel_thread;
+
+  /* Stack frame for switch_threads(). */
+  sf = alloc_frame (t, sizeof *sf);
+  sf->eip = switch_entry;
+  sf->ebp = 0;
+
+  /* Add to run queue. */
+  thread_unblock (t);
+
+  intr_disable();
+
+ //diverts CPU if ready list has an element with greater priority
+  thread_yield();
+
+  intr_enable();
+  return tid;
+}
+
+Updated to insert thread at a location where ready_list is still sorted.
+
+void
+thread_unblock (struct thread *t)
+{
+  enum intr_level old_level;
+
+  ASSERT (is_thread (t));
+
+  old_level = intr_disable ();
+  ASSERT (t->status == THREAD_BLOCKED);
+  //CHANGE
+  //list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list,&t->elem,(list_less_func *)&descend_sort_by_pri,NULL);
+  //list_sort (&ready_list, (list_less_func *)&descend_sort_by_pri, NULL);
+  t->status = THREAD_READY;
+  intr_set_level (old_level);
+}
+
+Updated to insert the current thread at a location where ready_list is still sorted.
+
+void
+thread_yield (void)
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+  if (cur != idle_thread){
+    list_push_back (&ready_list, &cur->elem);
+    list_sort (&ready_list, (list_less_func *)&descend_sort_by_pri, NULL);
+  }
+  cur->status = THREAD_READY;
+  schedule ();
+  intr_set_level (old_level);
+}
+
+
+
+Does basic initialization of T. Updated to have more initialization in order to function with property donation
+
+static void
+init_thread (struct thread *t, const char *name, int priority)
+{
+  //enum intr_level old_level;
+
+  ASSERT (t != NULL);
+  ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
+  ASSERT (name != NULL);
+
+  memset (t, 0, sizeof *t);
+  t->status = THREAD_BLOCKED;
+  strlcpy (t->name, name, sizeof t->name);
+  t->stack = (uint8_t *) t + PGSIZE;
+  //t->priority = priority;
+  //t->magic = THREAD_MAGIC;
+  //sema_init(&t->thread_sema,0);
+  //old_level = intr_disable ();
+  t->priority = priority;
+  t->magic = THREAD_MAGIC;
+  t->basepriority = priority;
+  t->lock_holder = NULL;
+  t->wanted_lock = NULL;
+  list_init (&t->list_pri_donors);
+  list_push_back (&all_list, &t->allelem);
+}
+
+Update to consider donor priorities and base priority when changing priority. Yield at the end to ensure correct thread is running
+
+void
+thread_set_priority (int new_priority)
+{
+
+  intr_disable ();
+
+  if((new_priority- thread_current()->priority)>0){
+    update_both_or_one(thread_current(),new_priority,1);
+  }else if((new_priority- thread_current()->priority)<0){
+    update_both_or_one(thread_current(),new_priority,0);
+  }else{
+    update_both_or_one(thread_current(),new_priority,0);
+  }
+  //printf("Problem is here");
+
+
+  //NO Donors
+  if(list_empty(&thread_current()->list_pri_donors)){
+    update_both_or_one(thread_current(),new_priority,1);
+  }else{
+    update_both_or_one(thread_current(),new_priority,0);
+  }
+
+  //check if ready)list contains thtead with
+  //greater priority
+  thread_yield();
+
+  intr_enable();
+
+}
+
+
+Helper function to sort list in descending order of priority
+int descend_sort_by_pri(struct list_elem *a,struct list_elem *b){
+  struct thread *one = list_entry(a,struct thread, elem);
+  struct thread *two = list_entry(b,struct thread, elem);
+
+  if((one->priority-two->priority)>0){
+    return 1;
+  }
+
+  return 0;
+}
+
+Helper function to update both priorities or just one priority
+void update_both_or_one(struct thread *t, int priority,int mode){
+    if(mode==1){
+      t->basepriority = priority;
+      t->priority = priority;
+    }else{
+      t->basepriority = priority;
+    }
+}
+
+>> B2: Explain the data structure used to track priority donation.
+>> Use ASCII art to diagram a nested donation.  (Alternately, submit a
+>> .png file.)
+
+ANS: We added the attributes basepriority, list of priority donors, list element for holding individual donors, and wanted lock to definition of thread in thread.h for the purpose of tracking priority donation. We did not use any complex data structures for the purpose, and our main approach just involved using lists that we sort in descending order of priority.
+
+If a lock is already acquired by a thread, and a different thread is wanting it, it is added to the waiters list of the lock. If donation is possible, which is denoted by the current thread we are working with having a higher priority than the holder of the lock that it wants, the effective priority of the holder is updated as required, and the thread is added as an individual donor to the list of donors. The list of donors are also sorted by priority, which ensures that the correct thread with max priority acquires it first when the lock is released and it helps to easily update the effective priority to the max of the other donors if a lock is released  The base priority is not affected by the donation of priorities.
+
+When it comes to releasing, the holder is made null, and the first element of the waiters list that is already sorted by priority, gets to acquire it. We traverse through the list of donors of the thread that was initially the holder of the lock and check all the donors of the released lock for removal. After removing the donors of the lock that has been released, if there are donors left from other locks, the thread’s effective priority changes to that of the donor with the max priority(which is the first element of the remaining sorted list elements). If there are no more donors left, we change it’s priority back to its base priority.
+
+The nested donation scenario is pushed under src/threads/ with the name NESTED_DONATION.png
+
+---- ALGORITHMS ----
+
+
+>> B3: How do you ensure that the highest priority thread waiting for
+>> a lock, semaphore, or condition variable wakes up first?
+
+ANS: We sort and insert threads to the list of waiters using the descend_sort_pri()
+function, which sorts threads with the max being the front element and the least priority thread being at the end. As a result, when these threads are ready, they are inserted to the ready list in order of decreasing priority, which ensures that the first thread always has max priority and is chosen first to be awake. Also, we ensured that every element being added to the ready list is always inserted in the same descending priority order.
+
+
+>> B4: Describe the sequence of events when a call to lock_acquire()
+>> causes a priority donation.  How is nested donation handled?
+
+ANS: EVENTS: First of all, if a thread is already holding a lock and our current
+thread wishes to acquire it, no matter what it's priority is, it has to wait to be able to use
+it. This is when priority donation may step in. If the effective priority of our current thread
+is greater than that of the holder of the lock that it wants, effective priority is donated to the latter.
+This only changes the effective priority of the holder of the lock and base priority remains the same.
+If the priority of the lock holder is less than or equal to that of the current thread there is no donation.
+
+HANDLING: In a nested donation scenario we traverse through the chained lock holders till we reach a thread
+that has no lock that it wants to acquire.This is done when inside sema_down() while the threads are waiting.
+During traversal, if the effective priority of the thread we are currently on is greater than that of the
+holder of the lock, it gets donated to the holder and we move to the holder now being the current thread being inspected.
+This process goes on till we reach the root of the chain, which is denoted by the wanted_lock attribute in threads being null.
+Now that all priority donations have been handled, we then add the threads to the list of waiters and sort the list according to the
+priorities for ease of releasing locks later in the process and also for the easy of implementing the function cond_signal.
+ 
+>> B5: Describe the sequence of events when lock_release() is called
+>> on a lock that a higher-priority thread is waiting for.
+
+ANS: Starting with the holder, its list of priority donors is traversed if not empty  and if there is any thread that wants to acquire the lock that it is holding, it is removed. Then, if there exists more donors from other locks, the first element(as in our implementation the list of donors are sorted by priority) of the remaining list, donates it’s priority to the holder and if there are no donors, the priority of the holder returns to its base priority. Finally, as the waiters are sorted by priority, according to our implementation, the first element itself holds the max priority among the waiters. Thus, it’s wanted lock becomes NULL and it becomes the holder of the lock.
+
+---- SYNCHRONIZATION ----
+
+
+>> B6: Describe a potential race in thread_set_priority() and explain
+>> how your implementation avoids it.  Can you use a lock to avoid
+>> this race?
+>> ANSWER: When priority is being changed of a thread to a donated priority then if it is interrupted by a timer to do a priority change, then the thread structure might have some problems and this is when a potential race could occur. Our program handles this by disabling interrupts while set_priority is running, then it is turned back on in the end. It is not possible to use a lock to avoid this race because interrupt threads can’t have locks and we did not provide any lock relationship between donors and the thread that is holding the locks.
+
+
+---- RATIONALE ----
+
+
+>> B7: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+
+ANS: We haven’t really thought of a different way of doing this part of the assignment and have been trying to implement this approach from the beginning. Our design revolves around sorting all the lists with descending priorities. This allowed us to easily  understand and   compare priorities in operations like nested priority donation, as the element with the max priority which is the most important element of the list, exists right at the beginning. Since semaphores are a part of the struct lock, performing donations inside sema down allowed, made lock acquiring and releasing easy for us to implement as. We did first start with performing donations in the lock acquire function but it became confusing as significant changes made also had to be synchronized with the lock release function, thus opening the room for errors. Lastly, this design allowed 
+  
+
+
+              ADVANCED SCHEDULER
+              ==================
+\
+
+---- DATA STRUCTURES ----
+
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+Changes in thread.h:
+
+struct thread
+  {
+    int nice;                           /* nice value */
+    int recent_cpu;                /* recent_cpu value */
+  };
+
+Changes in thread.c:
+
+Updated to also change thread priority, recent_cpu and load average at certain timer ticks.
+
+void
+thread_tick (void)
+{
+  struct thread *t = thread_current ();
+
+  /* Update statistics. */
+  if (t == idle_thread)
+    idle_ticks++;
+#ifdef USERPROG
+  else if (t->pagedir != NULL)
+    user_ticks++;
+#endif
+  else
+    kernel_ticks++;
+  
+  /* Enforce preemption. */
+  if (++thread_ticks >= TIME_SLICE)
+    intr_yield_on_return ();
+
+  if (thread_mlfqs) {
+    if (strcmp(t->name, "idle")) {
+      t->recent_cpu = add_x_n(t->recent_cpu, 1);
+    }
+    
+    if (timer_ticks() % TIMER_FREQ == 0) {
+      update_load_avg();
+      update_recent_cpu();
+    }
+    if (timer_ticks() % 4 == 0) {
+      update_priority();
+    }
+  }
+}
+
+Sets current thread to a new nice value, then updates all threads priority.
+
+void
+thread_set_nice (int nice UNUSED)
+{
+  if (nice > 40 || nice < -40) {
+    return;
+  }
+  thread_current ()->nice = nice;
+  update_priority();
+}
+
+Updated to return the current thread's nice value
+
+int
+thread_get_nice (void)
+{
+  return thread_current ()->nice;
+}
+
+Returns to load average multiplied with 100
+
+int
+thread_get_load_avg (void)
+{
+  
+  return x_to_int(load_avg * 100);
+}
+
+Returns the recent_cpu of the current thread multiplied with 100
+
+int
+thread_get_recent_cpu (void)
+{
+  return x_to_int(thread_current()->recent_cpu * 100);
+}
+
+Updated to initialize nice value and recent_cpu of the thread t. Also ensures it it in mlfqs mode
+
+static void
+init_thread (struct thread *t, const char *name, int priority)
+{
+  //enum intr_level old_level;
+
+  ASSERT (t != NULL);
+  ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
+  ASSERT (name != NULL);
+
+  memset (t, 0, sizeof *t);
+  t->status = THREAD_BLOCKED;
+  strlcpy (t->name, name, sizeof t->name);
+  t->stack = (uint8_t *) t + PGSIZE;
+  //t->priority = priority;
+  //t->magic = THREAD_MAGIC;
+  //sema_init(&t->thread_sema,0);
+  //old_level = intr_disable ();
+  if (thread_mlfqs) {
+    if(strcmp(t->name, "main")) {
+      t->recent_cpu = thread_current()->recent_cpu;
+      t->nice = thread_current()->nice;
+    } else {
+      t->recent_cpu = 0;
+      t->nice = 0;
+    }
+    priority = PRI_MAX - x_to_int(t->recent_cpu / 4) - (t->nice * 2);
+  } else {
+    t->priority = priority;
+  }
+  t->magic = THREAD_MAGIC;
+  t->basepriority = priority;
+  t->lock_holder = NULL;
+  t->wanted_lock = NULL;
+  list_init (&t->list_pri_donors);
+  list_push_back (&all_list, &t->allelem);
+}
+
+Converts a fix point number to an integer
+
+int x_to_int(int x) {
+  int f = 1 << 14;
+  return (x >= 0 ? x + f / 2 : x - f / 2) / f;
+}
+
+Adds a fixed point number with an integer
+
+int add_x_n(int x, int n) {
+  return x + n * (1 << 14);
+}
+
+Multiplies two fixed point numbers
+
+int mult_x_y(int x, int y) {
+  return ((int64_t) x) * y / (1 << 14);
+}
+
+Divides two fixed point numbers
+
+int div_x_y(int x, int y) {
+  return ((int64_t) x) * (1 << 14) / y;
+}
+
+Updates the given thread’s priority based on formula: priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+
+void update_priority(struct thread *t) {
+  t->priority = PRI_MAX - x_to_int(t->recent_cpu / 4) - (t->nice * 2);
+}
+
+Updates all the thread’s priority based on formula: priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+
+void update_priority() {
+  struct list_elem *e;
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) {
+    struct thread *t = list_entry (e, struct thread, allelem);
+    update_priority(t);
+  }
+}
+
+Updates all the thread’s recent_cpu based on formula: recent_cpu = (2*load_avg)/(2*load_avg + 1) * recent_cpu + nice
+
+void update_recent_cpu() {
+  int two_load_avg = load_avg * 2;
+  struct list_elem *e;
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) {
+    struct thread *t = list_entry (e, struct thread, allelem);
+    t->recent_cpu = add_x_n(div_x_y(mult_x_y(two_load_avg, t->recent_cpu), add_x_n(two_load_avg, 1)), t->nice);
+  }
+}
+
+Updates all load average based on formula: load_avg = (59/60)*load_avg + (1/60)*ready_threads
+
+void update_load_avg() {
+  int f = 1 << 14;
+  int thread_ready = list_size(&ready_list) + (strcmp(thread_current()->name,"idle") != 0);
+  load_avg = ((load_avg * 59) / 60) + ((thread_ready * f) / 60);
+}
+
+Changes in synch.c:
+
+Updated to run lock_aqcuire before thread donation implementation if in mlfqs mode. Else will consider donation
+
+void
+lock_acquire (struct lock *lock)
+{
+
+  ASSERT (lock != NULL);
+  ASSERT (!intr_context ());
+  ASSERT (!lock_held_by_current_thread (lock));
+  if (thread_mlfqs) {
+    sema_down (&lock->semaphore);
+    lock->holder = thread_current ();
+  } else {
+    enum intr_level old_level = intr_disable ();
+
+    if (lock->holder!=NULL)
+      {
+
+        list_insert_ordered(&lock->holder->list_pri_donors,
+          &thread_current()->each_donor,
+          (list_less_func *) &descend_sort_by_pri, NULL);
+        thread_current()->wanted_lock = lock;
+      }
+    sema_down (&lock->semaphore);
+    lock->holder = thread_current ();
+
+    intr_set_level (old_level);
+  }
+}
+
+Updated to run lock_release before thread donation implementation if in mlfqs mode. Else will consider donation
+
+void
+lock_release (struct lock *lock)
+{
+  ASSERT (lock != NULL);
+  ASSERT (lock_held_by_current_thread (lock));
+  if (thread_mlfqs) {
+    lock->holder = NULL;
+    sema_up (&lock->semaphore);
+  } else {
+    enum intr_level old_level = intr_disable();
+    lock->holder = NULL;
+
+    struct list_elem *i = list_begin(&thread_current()->list_pri_donors);
+    while (i != list_end(&thread_current()->list_pri_donors))
+      {
+        struct thread *donor = list_entry(i, struct thread, each_donor);
+        if (donor->wanted_lock != lock)
+      {
+          list_sort(&thread_current()->list_pri_donors,(list_less_func *)&descend_sort_by_pri,NULL);
+      }else{
+          list_remove(i);
+      }
+        i = list_next(i);
+      }
+
+      if(list_empty(&thread_current()->list_pri_donors)){
+          thread_current()->priority = thread_current()->basepriority;
+      }else{
+          struct list_elem *donor_elem = list_front(&thread_current()->list_pri_donors);
+          struct thread *pri_donor = list_entry(donor_elem,struct thread, each_donor);
+          thread_current()->priority = thread_current()->basepriority;
+        if((pri_donor->priority-thread_current()->priority)>0){
+              thread_current()->priority= pri_donor->priority;
+          }else{
+              thread_current()->priority = thread_current()->basepriority;
+          }
+      }
+
+    sema_up (&lock->semaphore);
+    intr_set_level (old_level);
+  }
+}
+
+
+---- ALGORITHMS ----
+
+
+>> C2: Suppose threads A, B, and C have nice values 0, 1, and 2.  Each
+>> has a recent_cpu value of 0.  Fill in the table below showing the
+>> scheduling decision and the priority and recent_cpu values for each
+>> thread after each given number of timer ticks:
+
+
+timer  recent_cpu    priority   thread
+ticks   A   B   C   A   B   C   to run
+-----  --  --  --  --  --  --   ------
+ 0     0   0   0  63  61  59   A
+ 4     4   0   0  62  61  59   A
+ 8     8   0   0  61  61  59   B
+12      8   4   0  61  60  59   A
+16     12   4   0  60  60  59   B
+20     12   8   0  60  59  59   A
+24     16   8   0  59  59  59   C
+28     16   8   4  59  59  58   B
+32     16  12   4  59  58  58   A
+36     20  12   4  58  58  58   C
+
+>> C3: Did any ambiguities in the scheduler specification make values
+>> in the table uncertain?  If so, what rule did you use to resolve
+>> them?  Does this match the behavior of your scheduler?
+
+ANS: When there is a tie for the highest priority, the scheduler uses round-robin to determine which thread should be running. This made the table uncertain because if the direction of round-robin was not specified. For example, if A is currently running and A, B, and C have the same priority, it doesn’t mention if we should yield to B or C or stay at A. We decided to yield to the thread with the lowest recent_cpu. This is not the same for our scheduler since we do not check recent_cpu.
+
+>> C4: How is the way you divided the cost of scheduling between code
+>> inside and outside interrupt context likely to affect performance?
+
+ANS: Inside the interrupt context, the priorities of all the threads change every fourth tick. Since all the priorities are changing this can potentially affect performance especially if there is a high amount of threads. There is no other time that all the priorities will be changed outside of the interrupt context.
+
+---- RATIONALE ----
+
+
+>> C5: Briefly critique your design, pointing out advantages and
+>> disadvantages in your design choices.  If you were to have extra
+>> time to work on this part of the project, how might you choose to
+>> refine or improve your design?
+
+ANS: In update_recent_cpu() and update_priorities(), I used the loop from thread_foreach() instead of calling it. This repeats similar code making it an unpreferred design. I didn’t call thread_foreach() since there were issues with the “aux” parameter. I would have used it if I had extra time to work on this project. An advantage in my design choices is that I made update_load_avg(), update_recent_cpu() and update_priority() functions so updating load_avg, recent_cpu and update_priority can be used anywhere without having to manually re-apply the given formulas.
+
+>> C6: The assignment explains arithmetic for fixed-point math in
+>> detail, but it leaves it open to you to implement it.  Why did you
+>> decide to implement it the way you did?  If you created an
+>> abstraction layer for fixed-point math, that is, an abstract data
+>> type and/or a set of functions or macros to manipulate fixed-point
+>> numbers, why did you do so?  If not, why not?
+
+ANS: Since the given formulas used division, it is likely that a decimal number would occur (in fact 59/60 and 1/60 are already). Since Pintos does not support floating-point arithmetic, we must use fixed-point arithmetic. We implemented some functions that do fixed-point arithmetic if it required more than one step. For example, we implemented multiplying two fixed-point numbers since it's more than one step but not adding two fixed-point numbers since it's just one step.
+
+               SURVEY QUESTIONS
+               ================
+
+ 
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+>>In our opinion some of the problems were too hard such as the second task, they required a lot of understanding which was time consuming
+
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+>> We believe that working on the second task gave us a little more insight because of the priority scheduling. We learned how to handle threads efficiently, so that each thread would have a fair amount of time to run and that starvation doesn’t occur.
+
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+>> Telling the students exactly what parts to work on, such as which functions need changing and in what files would be helpful for students to get started.
+
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+>> It would be beneficial if TAs go through the pintos code during OH to help us have a better understanding. Some coding exercises similar to the project tasks would also be helpful. As well as helping us to create a stronger connection between the theory and actual implementation.
+
+
+>> Any other comments?
+>> Helping students understand the concepts and on how to implement future tasks would be helpful, since a lot of students are lost at the beginning and it consumes a lot of time until they finally understand what to do.

@@ -1,1 +1,2 @@
-# Pintos
+# CSCC69-Pintos
+
